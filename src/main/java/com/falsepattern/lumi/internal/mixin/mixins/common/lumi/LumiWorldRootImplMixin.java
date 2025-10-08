@@ -88,6 +88,12 @@ public abstract class LumiWorldRootImplMixin implements IBlockAccess, LumiWorldR
     // endregion
 
     private LumiWorld[] lumi$lumiWorlds;
+    
+    // Simple LRU cache for chunk lookups to avoid expensive HashMap operations
+    private static final int CHUNK_CACHE_SIZE = 8; // Small cache for hot chunks
+    private final long[] lumi$chunkCacheKeys = new long[CHUNK_CACHE_SIZE];
+    private final LumiChunkRoot[] lumi$chunkCacheValues = new LumiChunkRoot[CHUNK_CACHE_SIZE];
+    private int lumi$chunkCacheIndex = 0;
 
     @Override
     public LumiWorld[] lumi$getLumiWorlds() {
@@ -150,23 +156,46 @@ public abstract class LumiWorldRootImplMixin implements IBlockAccess, LumiWorldR
         if (chunkProvider == null)
             return null;
 
-        if (chunkProvider instanceof ChunkProviderServer) {
+        // Pack coordinates into a long key for fast cache lookup
+        val key = ((long) chunkPosX << 32) | (chunkPosZ & 0xFFFFFFFFL);
+        
+        // Check cache first - simple linear search is faster than hashing for small arrays
+        for (int i = 0; i < CHUNK_CACHE_SIZE; i++) {
+            if (lumi$chunkCacheKeys[i] == key) {
+                return lumi$chunkCacheValues[i];
+            }
+        }
+
+        LumiChunkRoot result = null;
+        
+        // Use isRemote to avoid instanceof check when possible
+        if (!isRemote && chunkProvider instanceof ChunkProviderServer) {
+            // Server-side fast path - direct HashMap access
             val chunkProviderServer = (ChunkProviderServer) chunkProvider;
             val loadedChunks = chunkProviderServer.loadedChunkHashMap;
             if (loadedChunks != null) {
                 val chunk = loadedChunks.getValueByKey(ChunkCoordIntPair.chunkXZ2Int(chunkPosX, chunkPosZ));
-                if (chunk instanceof LumiChunkRoot && !(chunk instanceof EmptyChunk))
-                    return (LumiChunkRoot) chunk;
+                // Single branch for both type checks
+                if (chunk instanceof LumiChunkRoot && !(chunk instanceof EmptyChunk)) {
+                    result = (LumiChunkRoot) chunk;
+                }
             }
-            return null;
+        } else {
+            // Client-side or other chunk provider - fallback path
+            if (chunkProvider.chunkExists(chunkPosX, chunkPosZ)) {
+                val chunk = chunkProvider.provideChunk(chunkPosX, chunkPosZ);
+                if (chunk instanceof LumiChunkRoot && !(chunk instanceof EmptyChunk)) {
+                    result = (LumiChunkRoot) chunk;
+                }
+            }
         }
-
-        if (chunkProvider.chunkExists(chunkPosX, chunkPosZ)) {
-            val chunk = chunkProvider.provideChunk(chunkPosX, chunkPosZ);
-            if (chunk instanceof LumiChunkRoot && !(chunk instanceof EmptyChunk))
-                return (LumiChunkRoot) chunk;
-        }
-        return null;
+        
+        // Cache the result (even null results to avoid repeated lookups)
+        lumi$chunkCacheKeys[lumi$chunkCacheIndex] = key;
+        lumi$chunkCacheValues[lumi$chunkCacheIndex] = result;
+        lumi$chunkCacheIndex = (lumi$chunkCacheIndex + 1) % CHUNK_CACHE_SIZE;
+        
+        return result;
     }
     // endregion
 
